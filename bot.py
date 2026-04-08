@@ -2108,8 +2108,8 @@ async def load_local_state() -> None:
 
     # Load LOCAL daily with proper locking
     try:
-        loaded_count, loaded_date = await state_manager.load_daily()
         async with sending_lock:
+            loaded_count, loaded_date = await state_manager.load_daily()
             daily_count = loaded_count
             daily_reset_date = loaded_date
         logging.info(f"📥 [LOCAL] Daily dimuat: {daily_count}/{DAILY_LIMIT}")
@@ -2725,7 +2725,7 @@ async def admin_command_processor() -> None:
     global admin_command_queue, DELAY_BETWEEN_SEND, DELAY_RANDOM_MIN, DELAY_RANDOM_MAX, \
            GROUP_SIZE, DELAY_BETWEEN_GROUP_MIN, DELAY_BETWEEN_GROUP_MAX, \
            BATCH_PAUSE_EVERY, BATCH_PAUSE_MIN, BATCH_PAUSE_MAX, DAILY_LIMIT, \
-           daily_count, daily_reset_date, is_paused, _shutdown_event
+           daily_count, daily_reset_date, is_paused, _shutdown_event, flood_ctrl
 
     if admin_command_queue is None:
         admin_command_queue = stdlib_queue.Queue()
@@ -2813,7 +2813,6 @@ async def admin_command_processor() -> None:
                         preset = presets[preset_name]
 
                         async with config_lock:
-                            # ✅ Sekarang sudah OK assign, karena global sudah di-declare
                             DELAY_BETWEEN_SEND      = preset["delay"]
                             DELAY_RANDOM_MIN        = preset["random_min"]
                             DELAY_RANDOM_MAX        = preset["random_max"]
@@ -2824,6 +2823,10 @@ async def admin_command_processor() -> None:
                             BATCH_PAUSE_MIN         = preset["batch_pause_min"]
                             BATCH_PAUSE_MAX         = preset["batch_pause_max"]
                             DAILY_LIMIT             = preset["daily_limit"]
+
+                            if flood_ctrl:
+                                flood_ctrl.group_delay_min = float(DELAY_BETWEEN_GROUP_MIN)
+                                flood_ctrl.group_delay_max = float(DELAY_BETWEEN_GROUP_MAX)
 
                         config = {
                             "daily_limit":       DAILY_LIMIT,
@@ -2850,7 +2853,6 @@ async def admin_command_processor() -> None:
                 elif cmd_type == "reset_daily":
                     try:
                         async with sending_lock:
-                            # ✅ Sekarang sudah OK karena global sudah di-declare
                             prev        = daily_count
                             daily_count = 0
                             daily_reset_date = datetime.now(timezone.utc).date()
@@ -3142,12 +3144,22 @@ async def queue_worker(bot) -> None:
                             f"🔄 Chat migrated to {new_id}, updating..."
                         )
                         global TARGET_CHAT_ID
-                        TARGET_CHAT_ID = new_id
-                        config = {
-                            "daily_limit": DAILY_LIMIT,
-                            "send_delay": DELAY_BETWEEN_SEND,
-                        }
-                        await state_manager.save_config(config)
+                        async with config_lock:
+                            TARGET_CHAT_ID = new_id
+                            config = {
+                                "target_chat_id": TARGET_CHAT_ID,
+                                "daily_limit": DAILY_LIMIT,
+                                "send_delay": DELAY_BETWEEN_SEND,
+                                "random_min": DELAY_RANDOM_MIN,
+                                "random_max": DELAY_RANDOM_MAX,
+                                "group_size": GROUP_SIZE,
+                                "group_delay_min": DELAY_BETWEEN_GROUP_MIN,
+                                "group_delay_max": DELAY_BETWEEN_GROUP_MAX,
+                                "batch_pause_every": BATCH_PAUSE_EVERY,
+                                "batch_pause_min": BATCH_PAUSE_MIN,
+                                "batch_pause_max": BATCH_PAUSE_MAX,
+                            }
+                            await state_manager.save_config(config)
                         success = False
                     else:
                         success = False
@@ -3158,10 +3170,10 @@ async def queue_worker(bot) -> None:
                 if success:
                     try:
                         async with sending_lock:
-                            # Add upper bound
+                            # Add upper bound - don't exceed limit
                             daily_count = min(
                                 daily_count + len(media_items),
-                                DAILY_LIMIT + len(media_items)
+                                DAILY_LIMIT
                             )
                             await check_daily_reset()
 
@@ -5147,6 +5159,21 @@ async def on_startup(app) -> None:
         duplicate_checker = EnhancedDuplicateChecker(global_sent_manager)
         queue_deduplicator = QueueDeduplicator(max_size=10000)
         _shutdown_event = asyncio.Event()
+
+        # Validate Telegram API connection
+        console_mgr.print_status_line("Validating Telegram API connection...")
+        logging.info(f"🔐 [BOT: {BOT_NAME}] Validating Telegram API connection...")
+        try:
+            me = await app.bot.get_me()
+            logging.info(
+                f"✅ [BOT: {BOT_NAME}] Authenticated as @{me.username} (ID: {me.id})"
+            )
+        except Exception as e:
+            logging.error(
+                f"❌ [BOT: {BOT_NAME}] Failed to authenticate with Telegram API: {e}"
+            )
+            startup_errors.append(("Telegram API", str(e)))
+            raise ValueError(f"Cannot authenticate with Telegram API: {e}")
 
         # RECOVERY SYSTEM
         console_mgr.print_status_line("Running recovery system...")
