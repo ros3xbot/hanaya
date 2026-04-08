@@ -3137,7 +3137,7 @@ async def queue_worker(bot) -> None:
                 except ValueError as e:
                     # Handle chat migration
                     if str(e).startswith("CHAT_MIGRATED:"):
-                        new_id = int(str(e).split(":"))
+                        new_id = int(str(e).split(":")[1])
                         logging.info(
                             f"🔄 Chat migrated to {new_id}, updating..."
                         )
